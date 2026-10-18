@@ -371,6 +371,7 @@ bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *n
 		break;
 	}
 
+	case ev_object:		// an object (self): the entity it is the script object of
 	case ev_entity:
 		if ( reg.entityNumberPtr ) {
 			idEntity *ent = GetEntity( *reg.entityNumberPtr );
