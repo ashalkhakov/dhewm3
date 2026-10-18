@@ -85,6 +85,7 @@ private:
 	void		HandleInspectThreads	( idBitMsg *msg );
 	void		HandleInspectScripts	( idBitMsg *msg );
 	void		HandleExecCommand		( idBitMsg *msg );
+	void		BeginStep				( void );
 	////
 
 	bool							mConnected;
@@ -101,6 +102,11 @@ private:
 	bool							mBreakNext;
 	bool							mBreakStepOver;
 	bool							mBreakStepInto;
+	// the thread a step began in, and where: only it ends the step
+	idInterpreter*					mStepInterpreter;
+	idStr							mStepFile;
+	int								mStepLine;
+	int								mStepDepth;
 	int								mBreakStepOverDepth;
 	const function_t*				mBreakStepOverFunc1;
 	const function_t*				mBreakStepOverFunc2;

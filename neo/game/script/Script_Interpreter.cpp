@@ -191,13 +191,6 @@ used primarily for the debugger and debugging
 ================
 */
 bool idInterpreter::GetRegisterValue( const char *name, idStr &out, int scopeDepth ) {
-	varEval_t		reg;
-	idVarDef		*d;
-	char			funcObject[ 1024 ];
-	char			*funcName;
-	const idVarDef	*scope = NULL;
-	const idVarDef	*scopeObj;
-	const idTypeDef	*field;
 	const function_t *func;
 
 	out.Empty();
@@ -214,6 +207,35 @@ bool idInterpreter::GetRegisterValue( const char *name, idStr &out, int scopeDep
 	if ( !func ) {
 		return false;
 	}
+
+	// a caller's locals (and its self) are on its own part of the stack
+	int savedStackBase = localstackBase;
+	if ( scopeDepth != callStackDepth ) {
+		localstackBase = callStack[ scopeDepth ].stackbase;
+	}
+	bool found = GetFrameRegisterValue( func, name, out );
+	localstackBase = savedStackBase;
+	return found;
+}
+
+/*
+================
+idInterpreter::GetFrameRegisterValue
+
+GetRegisterValue's lookup and formatting, in the frame whose function is func
+(localstackBase set to that frame's)
+================
+*/
+bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *name, idStr &out ) {
+	varEval_t		reg;
+	idVarDef		*d;
+	char			funcObject[ 1024 ];
+	char			*funcName;
+	const idVarDef	*scope = NULL;
+	const idVarDef	*scopeObj;
+	const idTypeDef	*field;
+
+	out.Empty();
 
 	idStr::Copynz( funcObject, func->Name(), sizeof( funcObject ) );
 	funcName = strstr( funcObject, "::" );
@@ -241,7 +263,7 @@ bool idInterpreter::GetRegisterValue( const char *name, idStr &out, int scopeDep
 	// Check the objects for it if it wasnt local to the function
 	if ( !d )
 	{
-		for ( ; scopeObj && scopeObj->TypeDef()->SuperClass(); scopeObj = scopeObj->TypeDef()->SuperClass()->def )
+		for ( ; scopeObj && scopeObj->Type() == ev_object && scopeObj->TypeDef()->SuperClass(); scopeObj = scopeObj->TypeDef()->SuperClass()->def )
 		{
 			d = gameLocal.program.GetDef( NULL, name, scopeObj );
 			if ( d )
@@ -316,6 +338,18 @@ bool idInterpreter::GetRegisterValue( const char *name, idStr &out, int scopeDep
 			case ev_float:
 				out = va( "%g", *( reinterpret_cast<float *>( &obj->data[ reg.ptrOffset ] ) ) );
 				return true;
+
+			case ev_vector: {
+				const idVec3 *v = reinterpret_cast<idVec3 *>( &obj->data[ reg.ptrOffset ] );
+				out = va( "%g,%g,%g", v->x, v->y, v->z );
+				return true;
+			}
+
+			case ev_entity: {
+				idEntity *ent = GetEntity( *( reinterpret_cast<int *>( &obj->data[ reg.ptrOffset ] ) ) );
+				out = ent ? va( "$%s", ent->GetName() ) : "$null_entity";
+				return true;
+			}
 				
 			case ev_string:	{
 				const char* str;
@@ -336,6 +370,15 @@ bool idInterpreter::GetRegisterValue( const char *name, idStr &out, int scopeDep
 		
 		break;
 	}
+
+	case ev_entity:
+		if ( reg.entityNumberPtr ) {
+			idEntity *ent = GetEntity( *reg.entityNumberPtr );
+			out = ent ? va( "$%s", ent->GetName() ) : "$null_entity";
+		} else {
+			out = "$null_entity";
+		}
+		return true;
 
 	case ev_string:
 		if ( reg.stringPtr ) {
@@ -1946,8 +1989,9 @@ void idGameEditExt::MSG_WriteCallstackFunc(idBitMsg* msg, const prstack_t* stack
 
 	if (stack->s == -1) //this is a fake stack created by debugger, use intruction pointer for retrieval.
 		st = &const_cast<idProgram*>( program )->GetStatement( instructionPtr );
-	else // Use the calling statement as the filename and linenumber where the call was made from		
-		st = &const_cast<idProgram*>( program )->GetStatement ( stack->s );
+	else // Use the calling statement as the filename and linenumber where the call was made from
+		// (stack->s is the statement the call returns to, the one after it)
+		st = &const_cast<idProgram*>( program )->GetStatement ( stack->s > 0 ? stack->s - 1 : stack->s );
 
 	if ( st )
 	{
@@ -1993,5 +2037,10 @@ int idGameEditExt::GetInterpreterCallStackDepth(const idInterpreter* interpreter
 
 const function_t*idGameEditExt::GetInterpreterCallStackFunction( const idInterpreter* interpreter, int stackDepth/* = -1*/)
 {
-	return interpreter->GetCallstack( )[ stackDepth > -1 ? stackDepth :interpreter->GetCallstackDepth( ) ].f;
+	// -1: the function executing (the call stack's entries are its callers;
+	// the one at the depth is past the top)
+	if ( stackDepth < 0 ) {
+		return interpreter->GetCurrentFunction();
+	}
+	return interpreter->GetCallstack( )[ stackDepth ].f;
 }

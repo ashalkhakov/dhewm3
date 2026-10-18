@@ -116,6 +116,7 @@ public:
 	void				Reset( void );
 
 	bool				GetRegisterValue( const char *name, idStr &out, int scopeDepth );
+	bool				GetFrameRegisterValue( const function_t *func, const char *name, idStr &out );
 	int					GetCallstackDepth( void ) const;
 	const prstack_t		*GetCallstack( void ) const;
 	const function_t	*GetCurrentFunction( void ) const;

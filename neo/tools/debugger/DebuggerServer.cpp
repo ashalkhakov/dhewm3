@@ -61,6 +61,9 @@ rvDebuggerServer::rvDebuggerServer ( )
 	mBreak				= false;
 	mBreakStepOver		= false;
 	mBreakStepInto		= false;
+	mStepInterpreter	= NULL;
+	mStepLine			= -1;
+	mStepDepth			= 0;
 	mGameThreadBreakCond = NULL;
 	mGameThreadBreakLock = NULL;
 	mLastStatementLine	= -1;
@@ -230,6 +233,7 @@ bool rvDebuggerServer::ProcessMessages ( void )
 				break;
 
 			case DBMSG_STEPOVER:
+				BeginStep ( );
 				mBreakStepOver = true;
 				mBreakStepOverDepth = ((idGameEditExt*) gameEdit)->GetInterpreterCallStackDepth(mBreakInterpreter);
 				mBreakStepOverFunc1 = ((idGameEditExt*) gameEdit)->GetInterpreterCallStackFunction(mBreakInterpreter);
@@ -245,9 +249,12 @@ bool rvDebuggerServer::ProcessMessages ( void )
 				break;
 
 			case DBMSG_STEPINTO:
+				BeginStep ( );
 				mBreakStepInto = true;
 				Resume ( );
 				break;
+
+
 
 			case DBMSG_INSPECTVARIABLE:
 				HandleInspectVariable ( &msg );
@@ -459,6 +466,21 @@ void rvDebuggerServer::HandleExecCommand( idBitMsg *msg ) {
 
 /*
 ================
+rvDebuggerServer::BeginStep
+
+A step begins where the game stopped: its thread, line and call depth.
+================
+*/
+void rvDebuggerServer::BeginStep( void )
+{
+	mStepInterpreter = mBreakInterpreter;
+	mStepFile = ((idGameEditExt*) gameEdit)->GetFilenameForStatement(mBreakProgram, mBreakInstructionPointer);
+	mStepLine = ((idGameEditExt*) gameEdit)->GetLineNumberForStatement(mBreakProgram, mBreakInstructionPointer);
+	mStepDepth = ((idGameEditExt*) gameEdit)->GetInterpreterCallStackDepth(mBreakInterpreter);
+}
+
+/*
+================
 rvDebuggerServer::HandleInspectScripts
 
 Send the list of the current loaded scripts in the interpreter back to the debugger client
@@ -543,6 +565,31 @@ void rvDebuggerServer::CheckBreakpoints	( idInterpreter* interpreter, idProgram*
 	filename = ((idGameEditExt*) gameEdit)->GetFilenameForStatement(program, instructionPointer);
 	int linenumber = ((idGameEditExt*) gameEdit)->GetLineNumberForStatement(program, instructionPointer);
 
+	// A step: only the thread it began in ends it, on another line than the
+	// one it began on (other threads run meanwhile, and the thread may wait)
+	if ( ( mBreakStepOver || mBreakStepInto ) && interpreter == mStepInterpreter )
+	{
+		int depth = ((idGameEditExt*) gameEdit)->GetInterpreterCallStackDepth(interpreter);
+		if ( ((idGameEditExt*) gameEdit)->ReturnedFromFunction(program, interpreter, instructionPointer) )
+		{
+			// the thread returns from its last function: nothing left to step to
+			mBreakStepOver = false;
+			mBreakStepInto = false;
+		}
+		else if ( linenumber != mStepLine || depth != mStepDepth || mStepFile != filename )
+		{
+			if ( mBreakStepInto
+				|| ( mBreakStepOver && ((idGameEditExt*) gameEdit)->CheckForBreakPointHit(interpreter, mBreakStepOverFunc1, mBreakStepOverFunc2, mBreakStepOverDepth) ) )
+			{
+				mLastStatementFile = idStr(filename);
+				mLastStatementLine = linenumber;
+				HandleInspectScripts(NULL);
+				Break ( interpreter, program, instructionPointer );
+				return;
+			}
+		}
+	}
+
 	// Operate on lines, not statements
 	if ( mLastStatementLine == linenumber && mLastStatementFile == filename)
 	{
@@ -554,37 +601,10 @@ void rvDebuggerServer::CheckBreakpoints	( idInterpreter* interpreter, idProgram*
 	mLastStatementFile = idStr(filename);
 	mLastStatementLine = linenumber;
 
-	// Reset stepping when the last function on the callstack is returned from
-	if ( ((idGameEditExt*) gameEdit)->ReturnedFromFunction(program, interpreter,instructionPointer))
-	{
-		mBreakStepOver = false;
-		mBreakStepInto = false;
-	}
-
 	// See if we are supposed to break on the next script line
 	if ( mBreakNext )
 	{
 		HandleInspectScripts(NULL);
-		Break ( interpreter, program, instructionPointer );
-		return;
-	}
-
-	// Only break on the same callstack depth and thread as the break over
-	if ( mBreakStepOver )
-	{
-		//virtual bool CheckForBreakpointHit(interpreter,function1,function2,depth)
-		if (((idGameEditExt*) gameEdit)->CheckForBreakPointHit(interpreter, mBreakStepOverFunc1, mBreakStepOverFunc2, mBreakStepOverDepth))
-		{
-			Break ( interpreter, program, instructionPointer );
-			return;
-		}
-	}
-
-	// See if we are supposed to break on the next line
-	if ( mBreakStepInto )
-	{
-		HandleInspectScripts(NULL);
-		// Break
 		Break ( interpreter, program, instructionPointer );
 		return;
 	}
