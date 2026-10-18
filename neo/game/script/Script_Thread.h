@@ -226,6 +226,8 @@ public:
 	static void					ObjectMoveDone( int threadnum, idEntity *obj );
 
 	static idList<idThread*>&	GetThreads ( void );
+	// the script debugger's: what the thread is executing
+	const idInterpreter &		GetInterpreter( void ) const { return interpreter; }
 
 	bool						IsDoneProcessing ( void );
 	bool						IsDying			 ( void );

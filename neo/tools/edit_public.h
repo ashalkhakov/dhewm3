@@ -110,6 +110,7 @@ bool	DebuggerServerInit( void );
 void	DebuggerServerShutdown( void );
 void	DebuggerServerPrint( const char *text );
 void	DebuggerServerCheckBreakpoint( idInterpreter *interpreter, idProgram *program, int instructionPointer );
+void	DebuggerServerScriptError( idInterpreter *interpreter, idProgram *program, int instructionPointer, const char *message, bool isError );
 
 //Material Editor
 void	MaterialEditorInit( void );

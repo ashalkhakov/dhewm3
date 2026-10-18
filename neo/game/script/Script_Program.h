@@ -534,6 +534,10 @@ public:
 	void										ReturnEntity( idEntity *ent );
 
 	int											NumFilenames( void ) { return fileList.Num( ); }
+
+	// for the script debugger: every variable, in the order they were defined
+	int											NumVarDefs( void ) const { return varDefs.Num(); }
+	idVarDef *									GetVarDef( int index ) const { return varDefs[ index ]; }
 };
 
 /*

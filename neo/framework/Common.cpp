@@ -3438,6 +3438,11 @@ bool idCommonLocal::SetCallback(idCommon::CallbackType cbt, idCommon::FunctionPo
 			gameCallbacks.reloadImagesUserArg = userArg;
 			return true;
 
+		case idCommon::CB_DebuggerRequest:
+			gameCallbacks.debuggerRequestCB = (idGameCallbacks::DebuggerRequestCallback)cb;
+			gameCallbacks.debuggerRequestUserArg = userArg;
+			return true;
+
 		default:
 			Warning("Called idCommon::SetCallback() with unknown CallbackType %d!\n", cbt);
 			return false;
@@ -3457,6 +3462,14 @@ static bool updateDebugger( idInterpreter *interpreter, idProgram *program, int 
 		return true;
 	}
 	return false;
+}
+
+static void debuggerScriptError( idInterpreter *interpreter, idProgram *program, int instructionPointer, const char *message, bool isError )
+{
+	if ( com_editors & EDITOR_DEBUGGER )
+	{
+		DebuggerServerScriptError( interpreter, program, instructionPointer, message, isError );
+	}
 }
 
 // returns true if that function is available in this version of dhewm3
@@ -3485,6 +3498,10 @@ bool idCommonLocal::GetAdditionalFunction(idCommon::FunctionType ft, idCommon::F
 			com_debuggerSupported = true;
 			return true;
 
+		case idCommon::FT_DebuggerScriptError:
+			*out_fnptr = (idCommon::FunctionPointer)debuggerScriptError;
+			return true;
+
 		default:
 			*out_fnptr = NULL;
 			Warning("Called idCommon::SetCallback() with unknown FunctionType %d!\n", ft);
@@ -3495,11 +3512,14 @@ bool idCommonLocal::GetAdditionalFunction(idCommon::FunctionType ft, idCommon::F
 idGameCallbacks gameCallbacks;
 
 idGameCallbacks::idGameCallbacks()
-: reloadImagesCB(NULL), reloadImagesUserArg(NULL)
+: reloadImagesCB(NULL), reloadImagesUserArg(NULL),
+  debuggerRequestCB(NULL), debuggerRequestUserArg(NULL)
 {}
 
 void idGameCallbacks::Reset()
 {
 	reloadImagesCB = NULL;
 	reloadImagesUserArg = NULL;
+	debuggerRequestCB = NULL;
+	debuggerRequestUserArg = NULL;
 }

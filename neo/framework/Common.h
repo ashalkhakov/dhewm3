@@ -259,6 +259,16 @@ public:
 		// expecting callback to be like void cb(void* userarg, const idCmdArgs& cmdArgs)
 		// where cmdArgs contains the command+arguments that was called
 		CB_ReloadImages = 1,
+		// called by the script debugger server for the requests that need the game's
+		// script internals (DBMSG_INSPECTTHREADCALLSTACK, DBMSG_INSPECTVARIABLES,
+		// DBMSG_SETVARIABLE, DBMSG_INSPECTENTITY, DBMSG_SETNEXTSTATEMENT in
+		// tools/debugger/DebuggerMessages.h); expecting callback to be like
+		//   bool cb(void* userarg, int request, idInterpreter* interpreter, idBitMsg* in, idBitMsg* out)
+		// interpreter is the stopped one; in is the client's message after its DBMSG_* short,
+		// out the answer after its DBMSG_* short, which the callback writes as the message
+		// says. It returns false for a request it doesn't handle; asked with in and out NULL,
+		// it returns whether it handles the request (the server's DBCAP_* say so).
+		CB_DebuggerRequest = 2,
 	};
 
 	// returns true if setting the callback was successful, else false
@@ -277,6 +287,12 @@ public:
 		// it returns true if the game debugger is active.
 		// relevant for mods.
 		FT_UpdateDebugger,
+		// the function's signature is void fn(idInterpreter*, idProgram*, int, const char*, bool)
+		// with arguments: idInterpreter *interpreter, idProgram *program, int instructionPointer,
+		// const char *message, bool isError
+		// a script error (isError) or warning, before the game handles it: the script debugger
+		// may stop there, as its client asked (DBMSG_BREAKONERRORS)
+		FT_DebuggerScriptError,
 	};
 
 	// returns true if that function is available in this version of dhewm3
