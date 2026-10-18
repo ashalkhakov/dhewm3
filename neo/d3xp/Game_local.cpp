@@ -37,6 +37,7 @@ If you have questions concerning this license or the applicable additional terms
 
 #include "gamesys/SysCvar.h"
 #include "gamesys/SysCmds.h"
+#include "tools/debugger/DebuggerMessages.h"
 #include "script/Script_Thread.h"
 #include "ai/AI.h"
 #include "anim/Anim_Testmodel.h"
@@ -312,6 +313,129 @@ bool updateGameDebugger( idInterpreter *interpreter, idProgram *program, int ins
 }
 
 
+static void ( *debuggerScriptErrorFnPtr )( idInterpreter *interpreter, idProgram *program, int instructionPointer, const char *message, bool isError ) = NULL;
+void gameDebuggerScriptError( idInterpreter *interpreter, int instructionPointer, const char *message, bool isError ) {
+	if ( debuggerScriptErrorFnPtr != NULL && interpreter != NULL ) {
+		debuggerScriptErrorFnPtr( interpreter, &gameLocal.program, instructionPointer, message, isError );
+	}
+}
+
+/*
+===========
+DebuggerThreadInterpreter
+
+the interpreter of the script thread a script debugger request names (the stopped one too)
+===========
+*/
+static idInterpreter *DebuggerThreadInterpreter( int number, idInterpreter *stopped ) {
+	if ( stopped != NULL && stopped->GetThread() != NULL && stopped->GetThread()->GetThreadNum() == number ) {
+		return stopped;
+	}
+	idThread *thread = idThread::GetThread( number );
+	if ( thread == NULL || thread->GetInterpreter().GetCurrentFunction() == NULL ) {
+		return NULL;
+	}
+	return const_cast<idInterpreter *>( &thread->GetInterpreter() );
+}
+
+/*
+===========
+DebuggerRequest
+
+the script debugger's requests that need the scripts' internals (idCommon::CB_DebuggerRequest),
+answered as tools/debugger/DebuggerMessages.h says
+===========
+*/
+static bool DebuggerRequest( void *userArg, int request, idInterpreter *interpreter, idBitMsg *in, idBitMsg *out ) {
+	switch ( request ) {
+		case DBMSG_SCRIPTERROR:
+			return in == NULL && out == NULL && debuggerScriptErrorFnPtr != NULL;
+
+		case DBMSG_INSPECTVARIABLES: {
+			if ( out == NULL ) {
+				return true;
+			}
+			int number = in->ReadInt();
+			int scopeDepth = (short)in->ReadShort();
+			out->WriteInt( number );
+			out->WriteShort( (short)scopeDepth );
+			idInterpreter *threadInterpreter = DebuggerThreadInterpreter( number, interpreter );
+			if ( threadInterpreter == NULL ) {
+				out->WriteShort( 0 );
+			} else {
+				threadInterpreter->ListVariables( scopeDepth, out );
+			}
+			return true;
+		}
+
+		case DBMSG_INSPECTTHREADCALLSTACK: {
+			if ( out == NULL ) {
+				return true;
+			}
+			int number = in->ReadInt();
+			out->WriteInt( number );
+			idInterpreter *threadInterpreter = DebuggerThreadInterpreter( number, interpreter );
+			if ( threadInterpreter == NULL ) {
+				out->WriteShort( 0 );
+				return true;
+			}
+			( (idGameEditExt *)gameEdit )->MSG_WriteInterpreterInfo( out, threadInterpreter, &gameLocal.program, threadInterpreter->GetInstructionPointer() );
+			return true;
+		}
+
+		case DBMSG_INSPECTENTITY: {
+			if ( out == NULL ) {
+				return true;
+			}
+			char name[ MAX_STRING_CHARS ];
+			in->ReadString( name, sizeof( name ) );
+			out->WriteString( name );
+			idInterpreter::ListEntity( gameLocal.FindEntity( name[ 0 ] == '$' ? name + 1 : name ), out );
+			return true;
+		}
+
+		case DBMSG_SETVARIABLE: {
+			if ( out == NULL ) {
+				return true;
+			}
+			char name[ MAX_STRING_CHARS ];
+			char value[ MAX_STRING_CHARS ];
+			int number = in->ReadInt();
+			int scopeDepth = (short)in->ReadShort();
+			in->ReadString( name, sizeof( name ) );
+			in->ReadString( value, sizeof( value ) );
+			idStr result;
+			idInterpreter *threadInterpreter = DebuggerThreadInterpreter( number, interpreter );
+			bool set = false;
+			if ( threadInterpreter == NULL ) {
+				result = "no such thread";
+			} else {
+				set = threadInterpreter->SetRegisterValue( name, value, result, scopeDepth );
+			}
+			out->WriteInt( number );
+			out->WriteShort( (short)scopeDepth );
+			out->WriteString( name );
+			out->WriteByte( set ? 1 : 0 );
+			out->WriteString( result );
+			return true;
+		}
+
+		case DBMSG_SETNEXTSTATEMENT: {
+			if ( out == NULL ) {
+				return true;
+			}
+			int line = in->ReadInt();
+			bool set = interpreter->SetNextStatementLine( line );
+			out->WriteInt( set ? line : 0 );
+			out->WriteInt( interpreter->GetInstructionPointer() );
+			return true;
+		}
+
+		default:
+			return false;
+	}
+}
+
 /*
 ===========
 idGameLocal::Init
@@ -423,6 +547,8 @@ void idGameLocal::Init( void ) {
 
 	//debugger support
 	common->GetAdditionalFunction( idCommon::FT_UpdateDebugger,( idCommon::FunctionPointer * ) &updateDebuggerFnPtr,NULL);
+	common->GetAdditionalFunction(idCommon::FT_DebuggerScriptError, (idCommon::FunctionPointer*) &debuggerScriptErrorFnPtr, NULL);
+	common->SetCallback(idCommon::CB_DebuggerRequest, (idCommon::FunctionPointer)DebuggerRequest, NULL);
 
 }
 

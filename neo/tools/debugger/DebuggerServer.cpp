@@ -41,6 +41,8 @@ If you have questions concerning this license or the applicable additional terms
 const int MAX_MSGLEN = 8600;
 #endif
 
+#include "framework/GameCallbacks_local.h"
+
 #if SDL_VERSION_ATLEAST(3, 0, 0)
   // compat with SDL2
   #define SDL_CreateCond SDL_CreateCondition
@@ -58,9 +60,11 @@ rvDebuggerServer::rvDebuggerServer ( )
 {
 	mConnected			= false;
 	mBreakNext			= false;
+	mBreakOnErrors		= 0;
 	mBreak				= false;
 	mBreakStepOver		= false;
 	mBreakStepInto		= false;
+	mBreakStepOut		= false;
 	mStepInterpreter	= NULL;
 	mStepLine			= -1;
 	mStepDepth			= 0;
@@ -199,18 +203,21 @@ bool rvDebuggerServer::ProcessMessages ( void )
 			case DBMSG_CONNECT:
 				mConnected = true;
 				SendMessage ( DBMSG_CONNECTED );
+				SendVersion ( );
 				HandleInspectScripts ( NULL );
 				com_editors |= EDITOR_DEBUGGER;
 				break;
 
 			case DBMSG_CONNECTED:
 				mConnected = true;
+				SendVersion ( );
 				HandleInspectScripts( NULL );
 				com_editors |= EDITOR_DEBUGGER;
 				break;
 
 			case DBMSG_DISCONNECT:
 				ClearBreakpoints ( );
+				mBreakOnErrors = 0;
 				Resume ( );
 				mConnected = false;
 				com_editors &= ~EDITOR_DEBUGGER;
@@ -254,7 +261,24 @@ bool rvDebuggerServer::ProcessMessages ( void )
 				Resume ( );
 				break;
 
+			case DBMSG_STEPOUT:
+				BeginStep ( );
+				mBreakStepOut = true;
+				Resume ( );
+				break;
 
+			case DBMSG_BREAKONERRORS:
+				mBreakOnErrors = msg.ReadInt ( );
+				break;
+
+			// what needs the game's script internals: the game answers
+			case DBMSG_INSPECTVARIABLES:
+			case DBMSG_INSPECTTHREADCALLSTACK:
+			case DBMSG_INSPECTENTITY:
+			case DBMSG_SETVARIABLE:
+			case DBMSG_SETNEXTSTATEMENT:
+				HandleGameRequest ( (EDebuggerMessage)command, &msg );
+				break;
 
 			case DBMSG_INSPECTVARIABLE:
 				HandleInspectVariable ( &msg );
@@ -481,6 +505,120 @@ void rvDebuggerServer::BeginStep( void )
 
 /*
 ================
+rvDebuggerServer::SendVersion
+
+Tells the client which protocol version this server speaks and what it supports.
+Clients that don't know DBMSG_VERSION ignore it.
+================
+*/
+void rvDebuggerServer::SendVersion( void )
+{
+	idBitMsg	msgOut;
+	byte		buffer[MAX_MSGLEN];
+	int			capabilities = DBCAP_STEPOUT;
+
+	// one game callback answers them all
+	if ( GameHandles( DBMSG_INSPECTVARIABLES ) ) {
+		capabilities |= DBCAP_INSPECT;
+	}
+	if ( GameHandles( DBMSG_SCRIPTERROR ) ) {
+		capabilities |= DBCAP_BREAKONERRORS;
+	}
+	msgOut.Init( buffer, sizeof( buffer ) );
+	msgOut.BeginWriting();
+	msgOut.WriteShort( (short)DBMSG_VERSION );
+	msgOut.WriteInt( DEBUGGER_PROTOCOL_VERSION );
+	msgOut.WriteInt( capabilities );
+	SendPacket( msgOut.GetData(), msgOut.GetSize() );
+}
+
+/*
+================
+rvDebuggerServer::GameHandles
+
+Whether the game answers the request (idCommon::CB_DebuggerRequest); DBMSG_SCRIPTERROR:
+whether it reports its scripts' errors (idCommon::FT_DebuggerScriptError)
+================
+*/
+bool rvDebuggerServer::GameHandles( EDebuggerMessage dbmsg )
+{
+	if ( gameCallbacks.debuggerRequestCB == NULL ) {
+		return false;
+	}
+	return gameCallbacks.debuggerRequestCB( gameCallbacks.debuggerRequestUserArg, dbmsg, NULL, NULL, NULL );
+}
+
+/*
+================
+rvDebuggerServer::HandleGameRequest
+
+A request about the stopped game's scripts, which the game answers: the variables of a
+function on the stopped thread's call stack, another thread's call stack, an entity,
+setting a variable, the line the stopped thread goes on from. Only while stopped.
+================
+*/
+void rvDebuggerServer::HandleGameRequest( EDebuggerMessage dbmsg, idBitMsg* msg )
+{
+	idBitMsg	msgOut;
+	byte		buffer[MAX_MSGLEN];
+
+	if ( !mBreak || gameCallbacks.debuggerRequestCB == NULL ) {
+		return;
+	}
+	msgOut.Init( buffer, sizeof( buffer ) );
+	msgOut.BeginWriting();
+	msgOut.WriteShort( (short)dbmsg );
+	if ( !gameCallbacks.debuggerRequestCB( gameCallbacks.debuggerRequestUserArg, dbmsg, mBreakInterpreter, msg, &msgOut ) ) {
+		return;
+	}
+	if ( dbmsg == DBMSG_SETNEXTSTATEMENT ) {
+		// the stopped thread goes on from there: where a step begins
+		idBitMsg answer;
+		answer.Init( buffer, sizeof( buffer ) );
+		answer.SetSize( msgOut.GetSize() );
+		answer.BeginReading();
+		answer.ReadShort();
+		int line = answer.ReadInt();
+		int instructionPointer = answer.ReadInt();
+		if ( line != 0 ) {
+			mBreakInstructionPointer = instructionPointer;
+			mLastStatementLine = line;
+			mLastStatementFile = ((idGameEditExt*) gameEdit)->GetFilenameForStatement( mBreakProgram, instructionPointer );
+		}
+	}
+	SendPacket( msgOut.GetData(), msgOut.GetSize() );
+}
+
+/*
+================
+rvDebuggerServer::ScriptError
+
+A script error or warning, before the game handles it: the game stops there when the
+client asked for it (DBMSG_BREAKONERRORS), the client told why first (DBMSG_SCRIPTERROR).
+An error drops the map once the game is resumed.
+================
+*/
+void rvDebuggerServer::ScriptError( idInterpreter* interpreter, idProgram* program, int instructionPointer, const char* message, bool isError )
+{
+	idBitMsg	msgOut;
+	byte		buffer[MAX_MSGLEN];
+
+	if ( !mConnected || !( mBreakOnErrors & ( isError ? DBERR_ERRORS : DBERR_WARNINGS ) ) ) {
+		return;
+	}
+	msgOut.Init( buffer, sizeof( buffer ) );
+	msgOut.BeginWriting();
+	msgOut.WriteShort( (short)DBMSG_SCRIPTERROR );
+	msgOut.WriteByte( isError ? 1 : 0 );
+	msgOut.WriteString( message );
+	SendPacket( msgOut.GetData(), msgOut.GetSize() );
+
+	HandleInspectScripts( NULL );
+	Break( interpreter, program, instructionPointer );
+}
+
+/*
+================
 rvDebuggerServer::HandleInspectScripts
 
 Send the list of the current loaded scripts in the interpreter back to the debugger client
@@ -567,7 +705,7 @@ void rvDebuggerServer::CheckBreakpoints	( idInterpreter* interpreter, idProgram*
 
 	// A step: only the thread it began in ends it, on another line than the
 	// one it began on (other threads run meanwhile, and the thread may wait)
-	if ( ( mBreakStepOver || mBreakStepInto ) && interpreter == mStepInterpreter )
+	if ( ( mBreakStepOver || mBreakStepInto || mBreakStepOut ) && interpreter == mStepInterpreter )
 	{
 		int depth = ((idGameEditExt*) gameEdit)->GetInterpreterCallStackDepth(interpreter);
 		if ( ((idGameEditExt*) gameEdit)->ReturnedFromFunction(program, interpreter, instructionPointer) )
@@ -575,11 +713,13 @@ void rvDebuggerServer::CheckBreakpoints	( idInterpreter* interpreter, idProgram*
 			// the thread returns from its last function: nothing left to step to
 			mBreakStepOver = false;
 			mBreakStepInto = false;
+			mBreakStepOut = false;
 		}
 		else if ( linenumber != mStepLine || depth != mStepDepth || mStepFile != filename )
 		{
 			if ( mBreakStepInto
-				|| ( mBreakStepOver && ((idGameEditExt*) gameEdit)->CheckForBreakPointHit(interpreter, mBreakStepOverFunc1, mBreakStepOverFunc2, mBreakStepOverDepth) ) )
+				|| ( mBreakStepOver && ((idGameEditExt*) gameEdit)->CheckForBreakPointHit(interpreter, mBreakStepOverFunc1, mBreakStepOverFunc2, mBreakStepOverDepth) )
+				|| ( mBreakStepOut && depth < mStepDepth ) )
 			{
 				mLastStatementFile = idStr(filename);
 				mLastStatementLine = linenumber;
@@ -684,6 +824,7 @@ void rvDebuggerServer::Break ( idInterpreter* interpreter, idProgram* program, i
 	// Clear all the break types
 	mBreakStepOver = false;
 	mBreakStepInto = false;
+	mBreakStepOut  = false;
 	mBreakNext     = false;
 
 	// Grab the current statement and the filename that it came from

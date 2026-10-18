@@ -31,12 +31,14 @@ If you have questions concerning this license or the applicable additional terms
 #include "script/Script_Compiler.h"
 #include "script/Script_Thread.h"
 
+#include "tools/debugger/DebuggerMessages.h"
 #include "script/Script_Interpreter.h"
 
 #include "framework/FileSystem.h"
 
 // HvG: Debugger support
 extern bool updateGameDebugger( idInterpreter *interpreter, idProgram *program, int instructionPointer );
+extern void gameDebuggerScriptError( idInterpreter *interpreter, int instructionPointer, const char *message, bool isError );
 
 /*
 ================
@@ -226,16 +228,12 @@ GetRegisterValue's lookup and formatting, in the frame whose function is func
 (localstackBase set to that frame's)
 ================
 */
-bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *name, idStr &out ) {
-	varEval_t		reg;
+const idVarDef *idInterpreter::FindFrameDef( const function_t *func, const char *name, bool &inNamespace ) const {
 	idVarDef		*d;
 	char			funcObject[ 1024 ];
 	char			*funcName;
 	const idVarDef	*scope = NULL;
 	const idVarDef	*scopeObj;
-	const idTypeDef	*field;
-
-	out.Empty();
 
 	idStr::Copynz( funcObject, func->Name(), sizeof( funcObject ) );
 	funcName = strstr( funcObject, "::" );
@@ -255,7 +253,7 @@ bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *n
 
 	if ( !scope )
 	{
-		return false;
+		return NULL;
 	}
 
 	d = gameLocal.program.GetDef( NULL, name, scope );
@@ -273,13 +271,142 @@ bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *n
 		}
 	}	
 
+	inNamespace = ( scope == &def_namespace );
+	return d;
+}
+
+/*
+================
+DebuggerFormatValue
+
+A value of type type at ptr as the script debugger shows it
+================
+*/
+static bool DebuggerFormatValue( const idTypeDef *type, const byte *ptr, idStr &out ) {
+	switch ( type->Type() ) {
+		case ev_boolean:
+			out = va( "%d", *( reinterpret_cast<const int *>( ptr ) ) );
+			return true;
+
+		case ev_float:
+			out = va( "%g", *( reinterpret_cast<const float *>( ptr ) ) );
+			return true;
+
+		case ev_vector: {
+			const idVec3 *v = reinterpret_cast<const idVec3 *>( ptr );
+			out = va( "%g,%g,%g", v->x, v->y, v->z );
+			return true;
+		}
+
+		case ev_object:
+		case ev_entity: {
+			int entnum = *( reinterpret_cast<const int *>( ptr ) );
+			idEntity *ent = ( entnum > 0 && entnum <= MAX_GENTITIES ) ? gameLocal.entities[ entnum - 1 ] : NULL;
+			out = ent ? va( "$%s", ent->GetName() ) : "$null_entity";
+			return true;
+		}
+
+		case ev_string:
+			out = "\"";
+			out += reinterpret_cast<const char *>( ptr );
+			out += "\"";
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+/*
+================
+DebuggerParseValue
+
+The script debugger's text (as DebuggerFormatValue writes it) as a value of type type
+at ptr; false, with why, when it is none
+================
+*/
+static bool DebuggerParseValue( const idTypeDef *type, const char *text, byte *ptr, idStr &why ) {
+	idStr	value = text;
+	float	x, y, z;
+	char	rest;
+
+	value.StripLeading( ' ' );
+	value.StripTrailing( ' ' );
+	switch ( type->Type() ) {
+		case ev_boolean:
+			if ( value == "true" || value == "1" ) {
+				*( reinterpret_cast<int *>( ptr ) ) = 1;
+			} else if ( value == "false" || value == "0" ) {
+				*( reinterpret_cast<int *>( ptr ) ) = 0;
+			} else {
+				why = "not a boolean (1, 0, true or false)";
+				return false;
+			}
+			return true;
+
+		case ev_float:
+			if ( sscanf( value.c_str(), "%f %c", &x, &rest ) != 1 ) {
+				why = "not a number";
+				return false;
+			}
+			*( reinterpret_cast<float *>( ptr ) ) = x;
+			return true;
+
+		case ev_vector:
+			value.Replace( ",", " " );
+			if ( sscanf( value.c_str(), "%f %f %f %c", &x, &y, &z, &rest ) != 3 ) {
+				why = "not a vector (x,y,z)";
+				return false;
+			}
+			reinterpret_cast<idVec3 *>( ptr )->Set( x, y, z );
+			return true;
+
+		case ev_entity: {
+			if ( value.Length() > 0 && value[ 0 ] == '$' ) {
+				value = value.Right( value.Length() - 1 );
+			}
+			if ( value.Length() == 0 || value == "null_entity" || value == "null" ) {
+				*( reinterpret_cast<int *>( ptr ) ) = 0;
+				return true;
+			}
+			idEntity *ent = gameLocal.FindEntity( value );
+			if ( !ent ) {
+				why = va( "no entity %s", value.c_str() );
+				return false;
+			}
+			*( reinterpret_cast<int *>( ptr ) ) = ent->entityNumber + 1;
+			return true;
+		}
+
+		case ev_string:
+			if ( value.Length() >= 2 && value[ 0 ] == '"' && value[ value.Length() - 1 ] == '"' ) {
+				value = value.Mid( 1, value.Length() - 2 );
+			}
+			idStr::Copynz( reinterpret_cast<char *>( ptr ), value, MAX_STRING_LEN );
+			return true;
+
+		default:
+			why = "its type can't be set";
+			return false;
+	}
+}
+
+bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *name, idStr &out ) {
+	varEval_t		reg;
+	const idVarDef	*d;
+	bool			inNamespace;
+	const idTypeDef	*field;
+
+	out.Empty();
+
+	d = FindFrameDef( func, name, inNamespace );
 	if ( !d )
 	{
 		out = "???";
 		return false;
 	}
 	
-	reg = GetVariable( d );
+	reg = GetVariable( const_cast<idVarDef *>( d ) );
 	switch( d->Type() ) {
 	case ev_float:
 		if ( reg.floatPtr ) {
@@ -313,7 +440,7 @@ bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *n
 		idEntity*		entity;			
 		idScriptObject*	obj;
 		
-		if ( scope == &def_namespace ) {
+		if ( inNamespace ) {
 			// should never happen, but handle it safely anyway
 			return false;
 		}
@@ -330,43 +457,7 @@ bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *n
 			return false;
 		}
 		
-		switch ( field->Type() ) {
-			case ev_boolean:
-				out = va( "%d", *( reinterpret_cast<int *>( &obj->data[ reg.ptrOffset ] ) ) );
-				return true;
-
-			case ev_float:
-				out = va( "%g", *( reinterpret_cast<float *>( &obj->data[ reg.ptrOffset ] ) ) );
-				return true;
-
-			case ev_vector: {
-				const idVec3 *v = reinterpret_cast<idVec3 *>( &obj->data[ reg.ptrOffset ] );
-				out = va( "%g,%g,%g", v->x, v->y, v->z );
-				return true;
-			}
-
-			case ev_entity: {
-				idEntity *ent = GetEntity( *( reinterpret_cast<int *>( &obj->data[ reg.ptrOffset ] ) ) );
-				out = ent ? va( "$%s", ent->GetName() ) : "$null_entity";
-				return true;
-			}
-				
-			case ev_string:	{
-				const char* str;
-				str = reinterpret_cast<const char*>( &obj->data[ reg.ptrOffset ] );
-				if ( !str ) {
-					out = "\"\"";
-				} else {
-					out  = "\"";
-					out += str;			
-					out += "\"";
-				}
-				return true;
-			}
-
-			default:
-				return false;
-		}
+		return DebuggerFormatValue( field, &obj->data[ reg.ptrOffset ], out );
 		
 		break;
 	}
@@ -393,6 +484,254 @@ bool idInterpreter::GetFrameRegisterValue( const function_t *func, const char *n
 
 	default:
 		return false;
+	}
+}
+
+/*
+================
+idInterpreter::ListVariables
+
+For the script debugger (DBMSG_INSPECTVARIABLES): writes the variables of the function
+on the call stack at scopeDepth (-1: the one executing): a short count, then each one's
+name and value (strings, GetRegisterValue's) and kind (a byte: 0 for a parameter or
+local, 1 for a field of the object the function is a method of), as many as fit
+================
+*/
+void idInterpreter::ListVariables( int scopeDepth, idBitMsg *msg ) {
+	idStrList			names;
+	idList<int>			kinds;
+	const function_t	*func;
+	char				funcObject[ 1024 ];
+	char				*funcName;
+	const idVarDef		*scope = NULL;
+	const idVarDef		*scopeObj = NULL;
+	int					i;
+
+	if ( scopeDepth == -1 || scopeDepth == callStackDepth ) {
+		func = currentFunction;
+		scopeDepth = callStackDepth;
+	} else if ( scopeDepth >= 0 && scopeDepth < callStackDepth ) {
+		func = callStack[ scopeDepth ].f;
+	} else {
+		func = NULL;
+	}
+	if ( func ) {
+		idStr::Copynz( funcObject, func->Name(), sizeof( funcObject ) );
+		funcName = strstr( funcObject, "::" );
+		if ( funcName ) {
+			*funcName = '\0';
+			scopeObj = gameLocal.program.GetDef( NULL, funcObject, &def_namespace );
+			if ( scopeObj ) {
+				scope = gameLocal.program.GetDef( NULL, funcName + 2, scopeObj );
+			}
+		} else {
+			scope = gameLocal.program.GetDef( NULL, func->Name(), &def_namespace );
+		}
+	}
+
+	// the function's parameters and locals; then, for a method, its object's
+	// fields and its superclasses'
+	if ( scope ) {
+		for ( i = 0; i < gameLocal.program.NumVarDefs(); i++ ) {
+			const idVarDef *def = gameLocal.program.GetVarDef( i );
+			if ( def->scope == scope && def->Type() != ev_function && idStr::CharIsAlpha( def->Name()[ 0 ] ) ) {
+				names.AddUnique( def->Name() );
+				if ( kinds.Num() < names.Num() ) {
+					kinds.Append( 0 );
+				}
+			}
+		}
+	}
+	for ( ; scopeObj && scopeObj->Type() == ev_object; scopeObj = scopeObj->TypeDef()->SuperClass() ? scopeObj->TypeDef()->SuperClass()->def : NULL ) {
+		for ( i = 0; i < gameLocal.program.NumVarDefs(); i++ ) {
+			const idVarDef *def = gameLocal.program.GetVarDef( i );
+			if ( def->scope == scopeObj && def->Type() == ev_field && idStr::CharIsAlpha( def->Name()[ 0 ] ) && names.FindIndex( def->Name() ) < 0 ) {
+				names.Append( def->Name() );
+				kinds.Append( 1 );
+			}
+		}
+	}
+
+	// a vector's components (the compiler's <name>_x, _y, _z) are no variables of their own
+	for ( i = names.Num() - 1; i >= 0; i-- ) {
+		const idStr &name = names[ i ];
+		if ( name.Length() > 2 && name[ name.Length() - 2 ] == '_' && ( name.Right( 1 ) == "x" || name.Right( 1 ) == "y" || name.Right( 1 ) == "z" )
+			&& names.FindIndex( name.Left( name.Length() - 2 ) ) >= 0 ) {
+			names.RemoveIndex( i );
+			kinds.RemoveIndex( i );
+		}
+	}
+
+	// as many as the message holds, each with its value
+	idStrList	values;
+	int			size = 2;
+	int			count = 0;
+	for ( i = 0; i < names.Num(); i++ ) {
+		idStr value;
+		if ( !GetRegisterValue( names[ i ], value, scopeDepth ) ) {
+			value = "???";
+		}
+		size += names[ i ].Length() + 1 + value.Length() + 1 + 1;
+		if ( size > msg->GetRemainingSpace() ) {
+			break;
+		}
+		values.Append( value );
+		count++;
+	}
+	msg->WriteShort( count );
+	for ( i = 0; i < count; i++ ) {
+		msg->WriteString( names[ i ] );
+		msg->WriteString( values[ i ] );
+		msg->WriteByte( kinds[ i ] );
+	}
+}
+
+/*
+================
+idInterpreter::SetRegisterValue
+
+For the script debugger (DBMSG_SETVARIABLE): sets the variable name of the function on
+the call stack at scopeDepth (as GetRegisterValue finds it) to value (as GetRegisterValue
+writes values); out is the value it has then, or why it was not set
+================
+*/
+bool idInterpreter::SetRegisterValue( const char *name, const char *value, idStr &out, int scopeDepth ) {
+	const function_t	*func;
+	const idVarDef		*d;
+	bool				inNamespace;
+	bool				set = false;
+	int					depth = scopeDepth;
+
+	if ( depth == -1 ) {
+		depth = callStackDepth;
+	}
+	if ( depth < 0 || depth > callStackDepth ) {
+		out = "no such frame";
+		return false;
+	}
+	func = ( depth == callStackDepth ) ? currentFunction : callStack[ depth ].f;
+	if ( !func ) {
+		out = "no such frame";
+		return false;
+	}
+
+	// a caller's locals (and its self) are on its own part of the stack
+	int savedStackBase = localstackBase;
+	if ( depth != callStackDepth ) {
+		localstackBase = callStack[ depth ].stackbase;
+	}
+	d = FindFrameDef( func, name, inNamespace );
+	if ( !d ) {
+		out = va( "%s is not a variable here", name );
+	} else {
+		varEval_t reg = GetVariable( const_cast<idVarDef *>( d ) );
+		if ( d->Type() == ev_field ) {
+			idEntity *entity = inNamespace ? NULL : GetEntity( *( ( int * )&localstack[ localstackBase ] ) );
+			const idTypeDef *field = d->TypeDef()->FieldType();
+			if ( !entity || !field || !entity->scriptObject.data ) {
+				out = "no object";
+			} else {
+				set = DebuggerParseValue( field, value, &entity->scriptObject.data[ reg.ptrOffset ], out );
+			}
+		} else if ( reg.bytePtr ) {
+			set = DebuggerParseValue( d->TypeDef(), value, reg.bytePtr, out );
+		} else {
+			out = "it has no storage";
+		}
+	}
+	localstackBase = savedStackBase;
+	if ( set ) {
+		GetRegisterValue( name, out, scopeDepth );
+	}
+	return set;
+}
+
+/*
+================
+idInterpreter::SetNextStatementLine
+
+For the script debugger (DBMSG_SETNEXTSTATEMENT): the stopped thread goes on from the
+first statement of line, in the function and file it is executing; false when the
+function has none there
+================
+*/
+bool idInterpreter::SetNextStatementLine( int line ) {
+	int i;
+
+	if ( !currentFunction || instructionPointer < 0 || instructionPointer >= gameLocal.program.NumStatements() ) {
+		return false;
+	}
+	const statement_t &here = gameLocal.program.GetStatement( instructionPointer );
+	for ( i = currentFunction->firstStatement; i < currentFunction->firstStatement + currentFunction->numStatements; i++ ) {
+		const statement_t &st = gameLocal.program.GetStatement( i );
+		if ( st.linenumber == line && st.file == here.file ) {
+			instructionPointer = i;
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+================
+idInterpreter::ListEntity
+
+For the script debugger (DBMSG_INSPECTENTITY): writes an entity's spawn args and the fields
+of its script object (and its superclasses'): a short count, then each one's name, value
+and kind (DBVAR_SPAWNARG, DBVAR_FIELD), as many as fit
+================
+*/
+void idInterpreter::ListEntity( idEntity *entity, idBitMsg *msg ) {
+	idStrList	names;
+	idStrList	values;
+	idList<int>	kinds;
+	int			i;
+
+	if ( entity ) {
+		for ( i = 0; i < entity->spawnArgs.GetNumKeyVals(); i++ ) {
+			const idKeyValue *kv = entity->spawnArgs.GetKeyVal( i );
+			names.Append( kv->GetKey() );
+			values.Append( kv->GetValue() );
+			kinds.Append( DBVAR_SPAWNARG );
+		}
+		idScriptObject *obj = &entity->scriptObject;
+		for ( const idTypeDef *type = obj->data ? obj->GetTypeDef() : NULL; type && type->Type() == ev_object; type = type->SuperClass() ) {
+			for ( i = 0; i < gameLocal.program.NumVarDefs(); i++ ) {
+				const idVarDef *def = gameLocal.program.GetVarDef( i );
+				if ( def->scope != type->def || def->Type() != ev_field || !idStr::CharIsAlpha( def->Name()[ 0 ] ) ) {
+					continue;
+				}
+				idStr name = def->Name();
+				// a vector's components (the compiler's <name>_x, _y, _z) are no fields of their own
+				if ( name.Length() > 2 && name[ name.Length() - 2 ] == '_' && idStr::FindChar( "xyz", name[ name.Length() - 1 ] ) >= 0 ) {
+					continue;
+				}
+				idStr value;
+				if ( !DebuggerFormatValue( def->TypeDef()->FieldType(), &obj->data[ def->value.ptrOffset ], value ) ) {
+					value = "???";
+				}
+				names.Append( name );
+				values.Append( value );
+				kinds.Append( DBVAR_FIELD );
+			}
+		}
+	}
+
+	// as many as the message holds
+	int size = 2;
+	int count = 0;
+	for ( i = 0; i < names.Num(); i++ ) {
+		size += names[ i ].Length() + 1 + values[ i ].Length() + 1 + 1;
+		if ( size > msg->GetRemainingSpace() ) {
+			break;
+		}
+		count++;
+	}
+	msg->WriteShort( count );
+	for ( i = 0; i < count; i++ ) {
+		msg->WriteString( names[ i ] );
+		msg->WriteString( values[ i ] );
+		msg->WriteByte( kinds[ i ] );
 	}
 }
 
@@ -520,6 +859,7 @@ void idInterpreter::Error( const char *fmt, ... ) const {
 	StackTrace();
 
 	if ( ( instructionPointer >= 0 ) && ( instructionPointer < gameLocal.program.NumStatements() ) ) {
+		gameDebuggerScriptError( const_cast<idInterpreter *>( this ), instructionPointer, text, true );
 		statement_t &line = gameLocal.program.GetStatement( instructionPointer );
 		common->Error( "%s(%d): Thread '%s': %s\n", gameLocal.program.GetFilename( line.file ), line.linenumber, thread->GetThreadName(), text );
 	} else {
@@ -543,6 +883,7 @@ void idInterpreter::Warning( const char *fmt, ... ) const {
 	va_end( argptr );
 
 	if ( ( instructionPointer >= 0 ) && ( instructionPointer < gameLocal.program.NumStatements() ) ) {
+		gameDebuggerScriptError( const_cast<idInterpreter *>( this ), instructionPointer, text, false );
 		statement_t &line = gameLocal.program.GetStatement( instructionPointer );
 		common->Warning( "%s(%d): Thread '%s': %s", gameLocal.program.GetFilename( line.file ), line.linenumber, thread->GetThreadName(), text );
 	} else {
@@ -1079,6 +1420,9 @@ bool idInterpreter::Execute( void ) {
 				lastLineNumber = gameLocal.program.GetStatement(instructionPointer).linenumber;
 			}
 		}
+
+		// the debugger may have moved the thread on (DBMSG_SETNEXTSTATEMENT)
+		st = &gameLocal.program.GetStatement( instructionPointer );
 
 		switch( st->op ) {
 		case OP_RETURN:

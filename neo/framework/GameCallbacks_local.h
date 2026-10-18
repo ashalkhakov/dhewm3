@@ -43,6 +43,10 @@ struct idGameCallbacks {
 	ReloadImagesCallback	reloadImagesCB;
 	void*					reloadImagesUserArg;
 
+	typedef bool (*DebuggerRequestCallback)(void* userArg, int request, class idInterpreter* interpreter, class idBitMsg* in, class idBitMsg* out);
+	DebuggerRequestCallback	debuggerRequestCB;
+	void*					debuggerRequestUserArg;
+
 	idGameCallbacks();
 
 	// called when Game DLL is unloaded (=> the registered callbacks become invalid)

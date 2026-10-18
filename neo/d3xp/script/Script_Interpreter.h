@@ -116,7 +116,14 @@ public:
 	void				Reset( void );
 
 	bool				GetRegisterValue( const char *name, idStr &out, int scopeDepth );
+	void				ListVariables( int scopeDepth, idBitMsg *msg );
+	// the script debugger's (DBMSG_SETVARIABLE, DBMSG_SETNEXTSTATEMENT, DBMSG_INSPECTENTITY)
+	bool				SetRegisterValue( const char *name, const char *value, idStr &out, int scopeDepth );
+	bool				SetNextStatementLine( int line );
+	int					GetInstructionPointer( void ) const { return instructionPointer; }
+	static void			ListEntity( idEntity *entity, idBitMsg *msg );
 	bool				GetFrameRegisterValue( const function_t *func, const char *name, idStr &out );
+	const idVarDef		*FindFrameDef( const function_t *func, const char *name, bool &inNamespace ) const;
 	int					GetCallstackDepth( void ) const;
 	const prstack_t		*GetCallstack( void ) const;
 	const function_t	*GetCurrentFunction( void ) const;

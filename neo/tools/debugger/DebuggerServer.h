@@ -60,6 +60,7 @@ public:
 	bool		IsConnected				( void );
 
 	void		CheckBreakpoints		( idInterpreter *interpreter, idProgram *program, int instructionPointer );
+	void		ScriptError				( idInterpreter *interpreter, idProgram *program, int instructionPointer, const char *message, bool isError );
 
 	void		Print					( const char *text );
 
@@ -85,6 +86,9 @@ private:
 	void		HandleInspectThreads	( idBitMsg *msg );
 	void		HandleInspectScripts	( idBitMsg *msg );
 	void		HandleExecCommand		( idBitMsg *msg );
+	void		HandleGameRequest		( EDebuggerMessage dbmsg, idBitMsg *msg );
+	bool		GameHandles				( EDebuggerMessage dbmsg );
+	void		SendVersion				( void );
 	void		BeginStep				( void );
 	////
 
@@ -100,8 +104,10 @@ private:
 	bool							mBreak;
 
 	bool							mBreakNext;
+	int								mBreakOnErrors;		// DBERR_*
 	bool							mBreakStepOver;
 	bool							mBreakStepInto;
+	bool							mBreakStepOut;
 	// the thread a step began in, and where: only it ends the step
 	idInterpreter*					mStepInterpreter;
 	idStr							mStepFile;

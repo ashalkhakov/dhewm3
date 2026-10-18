@@ -238,6 +238,23 @@ void DebuggerServerCheckBreakpoint ( idInterpreter* interpreter, idProgram* prog
 
 /*
 ================
+DebuggerServerScriptError
+
+A script error or warning: the debugger client may want to stop there
+================
+*/
+void DebuggerServerScriptError ( idInterpreter* interpreter, idProgram* program, int instructionPointer, const char* message, bool isError )
+{
+	if ( !gDebuggerServer )
+	{
+		return;
+	}
+
+	gDebuggerServer->ScriptError ( interpreter, program, instructionPointer, message, isError );
+}
+
+/*
+================
 DebuggerServerPrint
 
 Sends a print message to the debugger client
